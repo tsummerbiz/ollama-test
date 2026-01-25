@@ -303,7 +303,7 @@ def process_chunk(
 def aggregate_results(
     results, 
     original_task_id: str,
-    encryption_password: str = "password"
+    encryption_password: str
 ):
     """
     【集約タスク】すべての翻訳チャンクを結合し、成果物を保存する
@@ -348,14 +348,13 @@ def aggregate_results(
     with open(log_output_path, 'w', encoding='utf-8') as f:
         json.dump(sorted_results, f, ensure_ascii=False, indent=2)
 
-    """
     # 4. 一時ファイルの削除
     for f in files_to_clean:
         try:
             f.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"Cleanup failed for {tmp_file}: {e}")
-    """
+
     # 5. 進捗キーの有効期限を短縮 (完了後の整理)
     redis_client.expire(f"progress:{original_task_id}:total", 60*60)
     redis_client.expire(f"progress:{original_task_id}:completed", 60*60)
