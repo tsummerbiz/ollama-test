@@ -1,7 +1,6 @@
 import os
 import shutil
 import io
-import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -24,48 +23,36 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 @app.post("/upload", summary="ファイルをアップロードして翻訳を開始")
 async def upload_file(
     file: UploadFile = File(...),
-    encryption_password: str = Query(..., description="暗号化用のパスワード"),
+    encryption_password: str = Query(..., description="暗号化用のパスワード"), # 追加
     source_lang: str = "Japanese",
     source_code: str = "ja",
     target_lang: str = "English",
     target_code: str = "en",
     chunk_size_kb: int = 4
 ):
-    # 1. 先にタスクID（UUID）を生成
-    parent_task_id = str(uuid.uuid4())
-    
-    # 2. タスクIDをベースにしたユニークなファイル名を作成
-    # 元の拡張子を維持したい場合は Path(file.filename).suffix を使用
-    extension = Path(file.filename).suffix
-    unique_filename = f"{parent_task_id}{extension}"
-    file_path = UPLOAD_DIR / unique_filename
+    file_path = UPLOAD_DIR / file.filename
     
     try:
-        # 3. ファイルを保存
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save error: {e}")
 
-    # 4. 生成したIDを指定してタスクを発行 (delay ではなく apply_async を使用)
-    split_and_dispatch.apply_async(
-        kwargs={
-            "file_path": str(file_path),
-            "encryption_password": encryption_password,
-            "chunk_size": chunk_size_kb * 1024,
-            "source_lang": source_lang,
-            "source_code": source_code,
-            "target_lang": target_lang,
-            "target_code": target_code
-        },
-        task_id=parent_task_id  # ここで事前に生成したIDを固定
+    # 親タスクに暗号化パスワードを渡して実行
+    task = split_and_dispatch.delay(
+        file_path=str(file_path),
+        encryption_password=encryption_password, # 追加
+        chunk_size=chunk_size_kb * 1024,
+        source_lang=source_lang,
+        source_code=source_code,
+        target_lang=target_lang,
+        target_code=target_code
     )
     
     return {
         "message": "Processing started",
-        "parent_task_id": parent_task_id,
-        "original_file_name": file.filename,
-        "saved_file_name": unique_filename
+        "parent_task_id": task.id,
+        "file_name": file.filename
     }
 
 @app.get("/download/{task_id}", summary="復号化してファイルをダウンロード")

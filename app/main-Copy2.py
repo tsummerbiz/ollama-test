@@ -1,7 +1,7 @@
 import os
 import shutil
 import io
-import uuid
+import redis
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +13,7 @@ from celery.contrib.abortable import AbortableAsyncResult
 
 # tasks.py から必要な関数をインポート
 # ※ decrypt_file が tasks.py に定義されている前提です
-from tasks import app as celery_app, split_and_dispatch, get_task_progress, decrypt_file, get_callback_id
+from tasks import app as celery_app, split_and_dispatch, get_task_progress, decrypt_file
 
 app = FastAPI(title="Distributed Translation System API")
 
@@ -24,48 +24,36 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 @app.post("/upload", summary="ファイルをアップロードして翻訳を開始")
 async def upload_file(
     file: UploadFile = File(...),
-    encryption_password: str = Query(..., description="暗号化用のパスワード"),
+    encryption_password: str = Query(..., description="暗号化用のパスワード"), # 追加
     source_lang: str = "Japanese",
     source_code: str = "ja",
     target_lang: str = "English",
     target_code: str = "en",
     chunk_size_kb: int = 4
 ):
-    # 1. 先にタスクID（UUID）を生成
-    parent_task_id = str(uuid.uuid4())
-    
-    # 2. タスクIDをベースにしたユニークなファイル名を作成
-    # 元の拡張子を維持したい場合は Path(file.filename).suffix を使用
-    extension = Path(file.filename).suffix
-    unique_filename = f"{parent_task_id}{extension}"
-    file_path = UPLOAD_DIR / unique_filename
+    file_path = UPLOAD_DIR / file.filename
     
     try:
-        # 3. ファイルを保存
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save error: {e}")
 
-    # 4. 生成したIDを指定してタスクを発行 (delay ではなく apply_async を使用)
-    split_and_dispatch.apply_async(
-        kwargs={
-            "file_path": str(file_path),
-            "encryption_password": encryption_password,
-            "chunk_size": chunk_size_kb * 1024,
-            "source_lang": source_lang,
-            "source_code": source_code,
-            "target_lang": target_lang,
-            "target_code": target_code
-        },
-        task_id=parent_task_id  # ここで事前に生成したIDを固定
+    # 親タスクに暗号化パスワードを渡して実行
+    task = split_and_dispatch.delay(
+        file_path=str(file_path),
+        encryption_password=encryption_password, # 追加
+        chunk_size=chunk_size_kb * 1024,
+        source_lang=source_lang,
+        source_code=source_code,
+        target_lang=target_lang,
+        target_code=target_code
     )
     
     return {
         "message": "Processing started",
-        "parent_task_id": parent_task_id,
-        "original_file_name": file.filename,
-        "saved_file_name": unique_filename
+        "parent_task_id": task.id,
+        "file_name": file.filename
     }
 
 @app.get("/download/{task_id}", summary="復号化してファイルをダウンロード")
@@ -77,8 +65,12 @@ async def download_file(
     完了したタスクの成果物を復号し、ストリームとして返却します。
     """
     # 1. RedisからコールバックタスクのIDを取得
-    callback_id = get_callback_id(task_id)
-    task_result = AsyncResult(callback_id, app=celery_app)
+    callback_id = redis_client.get(f"callback_map:{task_id}")
+    
+    # マッピングがない場合は、直接 task_id を使用（以前の互換性のため）
+    target_id = callback_id if callback_id else task_id
+    
+    task_result = AsyncResult(target_id, app=celery_app)
 
     # 2. タスク完了確認
     if not task_result.ready():
@@ -113,22 +105,30 @@ async def download_file(
 
 @app.get("/status/{task_id}")
 async def get_status(task_id: str):
-    task_result = AsyncResult(task_id, app=celery_app)
+    # 1. RedisからコールバックタスクのIDを取得
+    callback_id = redis_client.get(f"callback_map:{task_id}")
+   # マッピングがない場合は、直接 task_id を使用（以前の互換性のため）
+    target_id = callback_id if callback_id else task_id
+    task_result = AsyncResult(target_id, app=celery_app)
+   
+    progress_detail = get_task_progress(task_id)
     
     response = {
         "task_id": task_id,
-        "celery_status": task_result.status,
+        "celery_status": parent_res.status,
         "progress": get_task_progress(task_id),
     }
-    
-    # 1. RedisからコールバックタスクのIDを取得
-    callback_id = get_callback_id(task_id)
-    callback_result = AsyncResult(callback_id, app=celery_app)
-   
-    if callback_result.ready() and callback_result.status == "SUCCESS":
-        # ダウンロードには task_id を使うよう案内
-        response["download_url"] = f"/download/{task_id}?password=..."
-        response["result"] = task_result.result
+
+    if parent_res.ready() and parent_res.status == "SUCCESS":
+        # 親タスクの戻り値から callback_task_id を取得
+        callback_id = parent_res.result.get("callback_task_id")
+        callback_res = AsyncResult(callback_id, app=celery_app)
+        
+        response["callback_status"] = callback_res.status
+        if callback_res.ready() and callback_res.status == "SUCCESS":
+            # ダウンロードには callback_id を使うよう案内
+            response["download_url"] = f"/download/{callback_id}?password=..."
+            response["result"] = callback_res.result
 
     return JSONResponse(content=response)
 

@@ -115,6 +115,15 @@ def get_task_progress(task_id: str):
         "is_finished": completed >= total
     }
 
+def get_callback_id(task_id: str):
+    # 1. RedisからコールバックタスクのIDを取得
+    callback_id = redis_client.get(f"callback_map:{task_id}")
+    
+    # マッピングがない場合は、直接 task_id を使用（以前の互換性のため）
+    target_id = callback_id if callback_id else task_id
+
+    return target_id
+
 # --- タスク定義 ---
 
 @app.task(bind=True, name='tasks.split_and_dispatch')
@@ -191,13 +200,21 @@ def split_and_dispatch(
     ]
     
     # 全子タスク完了後に実行されるコールバック
-    callback = aggregate_results.s(original_task_id=task_id, encryption_password=encryption_password)
+    callback = aggregate_results.s(
+        original_task_id=task_id, 
+        encryption_password=encryption_password
+    )
     
-    chord(header)(callback)
-    
+    # chord を実行し、その AsyncResult を取得
+    chord_result = chord(header)(callback)
+
+    # 【重要】親IDからコールバックIDを引けるようにRedisに保存 (有効期限は24時間)
+    redis_client.setex(f"callback_map:{task_id}", 86400, chord_result.id)
+
     return {
         "status": "dispatched",
         "parent_task_id": task_id,
+        "callback_task_id": chord_result.id, 
         "total_chunks": len(chunk_paths)
     }
 
@@ -338,11 +355,10 @@ def aggregate_results(
             f.unlink(missing_ok=True)
         except Exception as e:
             logger.warning(f"Cleanup failed for {tmp_file}: {e}")
-
+    """
     # 5. 進捗キーの有効期限を短縮 (完了後の整理)
     redis_client.expire(f"progress:{original_task_id}:total", 60*60)
     redis_client.expire(f"progress:{original_task_id}:completed", 60*60)
-    """
 
     return {
         "status": "completed",
