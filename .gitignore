@@ -1,0 +1,55 @@
+#プロジェクト固有
+
+models/
+data/
+
+
+# Jupyter Notebookのチェックポイント（自動保存ファイル）
+.ipynb_checkpoints/
+
+# IPykernelの接続ファイル
+~/.ipython/
+
+# 出力ログや一時ファイル
+*.log
+
+# 仮想環境（Jupyter用に作成している場合）
+.venv/
+venv/
+env/
+
+# Pythonのキャッシュ
+__pycache__/
+*.py[cod]
+
+# 設定ファイル（パスワードなどが含まれる場合があるため）
+.env
+
+# --- Python Standard ---
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv/
+env/
+venv/
+build/
+dist/
+*.egg-info/
+
+# --- uv Specific ---
+# uv が作成する一時的なキャッシュディレクトリ
+.uv/
+
+# uv python install でインストールされた Python インタープリタ（パスを指定している場合）
+.python-version
+
+# --- IDEs ---
+.vscode/
+.idea/
+
+# --- Testing & Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+

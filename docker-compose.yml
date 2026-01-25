@@ -1,0 +1,92 @@
+#version: '3.8'
+
+services:
+  # ----------------------------------------------------------------
+  # [共通設定] アプリケーションコードとWorkerの定義
+  # ----------------------------------------------------------------
+  
+  # 【親サーバ (Host A) 用】: APIサーバー
+  fastapi:
+    build: ./app
+    container_name: fastapi_server
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    volumes:
+      - ./app:/app
+      - /app/.venv
+      - ./data:/data  # ホストのNFSマウントをコンテナに共有
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0  # コンテナ間通信用のエイリアス
+    depends_on:
+      - redis
+
+  # 【親サーバ (Host A) 用】: Parent Worker (分割・集約担当)
+  celery_parent:
+    build: ./app
+    container_name: celery_parent_worker
+    # parent_queue のみを監視
+    command: celery -A tasks worker --loglevel=info -Q parent_queue --concurrency=1 --prefetch-multiplier=1 -Ofair
+    volumes:
+      - ./app:/app
+      - /app/.venv
+      - ./data:/data
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      - redis
+
+  # 【親サーバ (Host A) 用】: Redis (Broker & Backend)
+  redis:
+    image: redis:7-alpine
+    container_name: redis_broker
+    ports:
+      - "6379:6379" # 子サーバからの接続を受け付けるためポート公開
+    volumes:
+      - redis_data:/data
+
+  # ----------------------------------------------------------------
+  # 【子サーバ (Host B) 用】
+  # 親サーバでは以下のブロックをコメントアウトまたは削除してください
+  # ----------------------------------------------------------------
+  celery_child:
+    build: ./app
+    container_name: celery_child_worker
+    # child_queue のみを監視
+    command: celery -A tasks worker --loglevel=info -Q child_queue --concurrency=1 --prefetch-multiplier=1 -Ofair
+    volumes:
+      - ./app:/app
+      - /app/.venv
+      - ./data:/data
+    environment:
+      # Host A のIPアドレスを指定してください (例: 192.168.1.10)
+      - REDIS_URL=redis://redis:6379/0
+#      - REDIS_URL=redis://10.10.3.7:6379/0
+      # Ollama APIのURL
+      - OLLAMA_API_URL=http://host.docker.internal:11434/api/generate
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  flower:
+      image: mher/flower:latest
+      container_name: flower
+      ports:
+        - "5555:5555"
+      command: [
+        "celery",
+        "flower",
+        "--broker=redis://redis:6379/0",
+        "--port=5555",
+        "--address=0.0.0.0",
+        "--persistent=True",
+        "--max_tasks=1000",
+        "--basic_auth=admin:changeme"
+        ]
+      environment:
+        - CELERY_BROKER_URL=redis://redis:6379/0
+      depends_on:
+        - redis
+      restart: unless-stopped
+
+volumes:
+  redis_data:
