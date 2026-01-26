@@ -5,3 +5,5 @@ requests
 python-multipart
 redis
 cryptography
+python-jose[cryptography]
+passlib[bcrypt]

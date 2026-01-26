@@ -3,23 +3,117 @@ import shutil
 import io
 import uuid
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query, Depends, status
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+
+from jose import JWTError, jwt
+#from passlib.context import CryptContext
+import bcrypt  # passlib の代わりにこれをインポート
+
 from celery.result import AsyncResult
 from celery.contrib.abortable import AbortableAsyncResult
 
-
-# tasks.py から必要な関数をインポート
-# ※ decrypt_file が tasks.py に定義されている前提です
+# tasks.py からのインポート
 from tasks import app as celery_app, split_and_dispatch, get_task_progress, decrypt_file, get_callback_id
 
-app = FastAPI(title="Distributed Translation System API")
+# --- 設定項目 (本番環境では環境変数から取得してください) ---
+SECRET_KEY = "YOUR_SUPER_SECRET_KEY_DONT_SHARE" # openssl rand -hex 32 等で生成
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+# ダミーのユーザーデータベース (実際にはDBから取得)
+fake_users_db = {
+    "admin_user": {
+        "username": "admin_user",
+        "full_name": "Admin",
+        "hashed_password": "$2b$12$WOJtEqRg63Wtm3pEa1K.p.4538RpoXBeqk1o0hHuziHnEPQtcqSPy", # 'password123' のハッシュ
+        "disabled": False,
+    }
+}
+
+#pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+app = FastAPI(title="Distributed Translation System API with JWT")
+
+# --- 静的ファイルの設定 ---
+# 'static' ディレクトリを '/test' というURLパスに紐付けます
+# html=True にすると、/ にアクセスした際に自動で index.html を探してくれます
+app.mount("/test", StaticFiles(directory="static", html=True), name="static")
+
+# ... 既存のCORS設定やエンドポイントのコード ...
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # テスト用。本番はドメインを制限してください
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 NFS_BASE_PATH = Path("/data/")
 UPLOAD_DIR = NFS_BASE_PATH / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- ユーティリティ関数 ---
+
+def verify_password(plain_password: str, hashed_password: str):
+    # 文字列をバイト列に変換してチェック
+    password_byte = plain_password.encode('utf-8')
+    hashed_byte = hashed_password.encode('utf-8')
+    return bcrypt.checkpw(password_byte, hashed_byte)
+
+# (参考) 新しくユーザーを作る時のハッシュ化関数
+def get_password_hash(password: str):
+    pwd_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt()
+    hashed_password = bcrypt.hashpw(pwd_bytes, salt)
+    return hashed_password.decode('utf-8')
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    user = fake_users_db.get(username)
+    if user is None:
+        raise credentials_exception
+    return user
+
+# --- 認証用エンドポイント ---
+@app.post("/token", summary="ログインしてアクセストークンを取得")
+async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = fake_users_db.get(form_data.username)
+    if not user or not verify_password(form_data.password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = create_access_token(data={"sub": user["username"]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# --- 保護された既存エンドポイント ---
 
 @app.post("/upload", summary="ファイルをアップロードして翻訳を開始")
 async def upload_file(
@@ -29,25 +123,20 @@ async def upload_file(
     source_code: str = "ja",
     target_lang: str = "English",
     target_code: str = "en",
-    chunk_size_kb: int = 4
+    chunk_size_kb: int = 4,
+    current_user: dict = Depends(get_current_user) # 認証を追加
 ):
-    # 1. 先にタスクID（UUID）を生成
     parent_task_id = str(uuid.uuid4())
-    
-    # 2. タスクIDをベースにしたユニークなファイル名を作成
-    # 元の拡張子を維持したい場合は Path(file.filename).suffix を使用
     extension = Path(file.filename).suffix
     unique_filename = f"{parent_task_id}{extension}"
     file_path = UPLOAD_DIR / unique_filename
     
     try:
-        # 3. ファイルを保存
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save error: {e}")
 
-    # 4. 生成したIDを指定してタスクを発行 (delay ではなく apply_async を使用)
     split_and_dispatch.apply_async(
         kwargs={
             "file_path": str(file_path),
@@ -58,49 +147,38 @@ async def upload_file(
             "target_lang": target_lang,
             "target_code": target_code
         },
-        task_id=parent_task_id  # ここで事前に生成したIDを固定
+        task_id=parent_task_id
     )
     
     return {
         "message": "Processing started",
+        "user": current_user["username"],
         "parent_task_id": parent_task_id,
-        "original_file_name": file.filename,
-        "saved_file_name": unique_filename
     }
 
 @app.get("/download/{task_id}", summary="復号化してファイルをダウンロード")
 async def download_file(
     task_id: str, 
-    password: str = Query(..., description="復号用のパスワード")
+    password: str = Query(..., description="復号用のパスワード"),
+    current_user: dict = Depends(get_current_user) # 認証を追加
 ):
-    """
-    完了したタスクの成果物を復号し、ストリームとして返却します。
-    """
-    # 1. RedisからコールバックタスクのIDを取得
     callback_id = get_callback_id(task_id)
     task_result = AsyncResult(callback_id, app=celery_app)
 
-    # 2. タスク完了確認
     if not task_result.ready():
         raise HTTPException(status_code=400, detail="Task is not finished yet.")
     
     if task_result.status != "SUCCESS":
         raise HTTPException(status_code=400, detail="Task failed or was cancelled.")
 
-    # 3. 結果の取得とファイルチェック
     result_data = task_result.result
-    # aggregate_results が返す辞書からパスを取得
     file_path_str = result_data.get("final_file") if isinstance(result_data, dict) else None
 
     if not file_path_str or not os.path.exists(file_path_str):
         raise HTTPException(status_code=404, detail="Result file not found.")
 
     try:
-        # 4. 復号
         decrypted_content = decrypt_file(Path(file_path_str), password)
-        
-        # 5. ストリーム返却
-        # ファイル名を指定してダウンロードさせる
         filename = f"translated_{task_id}.txt"
         return StreamingResponse(
             io.BytesIO(decrypted_content.encode('utf-8')),
@@ -108,11 +186,10 @@ async def download_file(
             headers={"Content-Disposition": f"attachment; filename={filename}"}
         )
     except Exception as e:
-        # パスワード間違いや復号エラーのハンドリング
-        raise HTTPException(status_code=401, detail=f"Decryption failed. Check your password. Error: {str(e)}")
+        raise HTTPException(status_code=401, detail=f"Decryption failed. Error: {str(e)}")
 
 @app.get("/status/{task_id}")
-async def get_status(task_id: str):
+async def get_status(task_id: str, current_user: dict = Depends(get_current_user)):
     task_result = AsyncResult(task_id, app=celery_app)
     
     response = {
@@ -121,27 +198,18 @@ async def get_status(task_id: str):
         "progress": get_task_progress(task_id),
     }
     
-    # 1. RedisからコールバックタスクのIDを取得
     callback_id = get_callback_id(task_id)
     callback_result = AsyncResult(callback_id, app=celery_app)
    
     if callback_result.ready() and callback_result.status == "SUCCESS":
-        # ダウンロードには task_id を使うよう案内
         response["download_url"] = f"/download/{task_id}?password=..."
         response["result"] = task_result.result
 
     return JSONResponse(content=response)
 
 @app.post("/cancel/{task_id}", summary="タスクの中断")
-async def cancel_task(task_id: str):
-    """
-    指定されたタスクに中断フラグを立て、キュー内の処理を取り消します。
-    """
-    # 実行中のタスク内の is_aborted() フラグをTrueにする
+async def cancel_task(task_id: str, current_user: dict = Depends(get_current_user)):
     abortable_detail = AbortableAsyncResult(task_id, app=celery_app)
     abortable_detail.abort()
-    
-    # まだ実行されていないタスクをキューから削除
     celery_app.control.revoke(task_id, terminate=True)
-    
-    return {"message": f"Cancellation signal sent to task {task_id}"}
+    return {"message": f"Cancellation signal sent to task {task_id}", "by": current_user["username"]}
