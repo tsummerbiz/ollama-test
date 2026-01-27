@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Translation API Tester</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 p-8">
+    <div class="max-w-2xl mx-auto space-y-8">
+        <h1 class="text-3xl font-bold text-center text-blue-600">Translation System Tester</h1>
+
+        <section class="bg-white p-6 rounded-lg shadow">
+            <h2 class="text-xl font-bold mb-4">1. Login (JWT)</h2>
+            <div class="grid grid-cols-2 gap-4">
+                <input id="username" type="text" placeholder="Username" value="admin_user" class="border p-2 rounded">
+                <input id="password" type="password" placeholder="Password" value="password123" class="border p-2 rounded">
+            </div>
+            <button onclick="login()" class="mt-4 bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600">Login</button>
+            <p id="auth-status" class="mt-2 text-sm text-gray-600">Status: Not Logged In</p>
+        </section>
+
+        <section class="bg-white p-6 rounded-lg shadow">
+            <h2 class="text-xl font-bold mb-4">2. Upload File</h2>
+            <div class="space-y-4">
+                <input id="file-input" type="file" class="block w-full text-sm">
+                <input id="enc-password" type="text" placeholder="Encryption Password" class="border p-2 w-full rounded">
+                <button onclick="uploadFile()" class="bg-green-500 text-white px-4 py-2 rounded hover:bg-green-600 w-full">Start Translation</button>
+            </div>
+        </section>
+
+        <section class="bg-white p-6 rounded-lg shadow">
+            <h2 class="text-xl font-bold mb-4">3. Task Management</h2>
+            <div class="flex gap-2 mb-4">
+                <input id="task-id" type="text" placeholder="Task ID" class="border p-2 flex-1 rounded">
+                <button onclick="checkStatus()" class="bg-gray-500 text-white px-4 py-2 rounded">Check Status</button>
+            </div>
+            
+            <div id="status-display" class="bg-gray-50 p-4 rounded text-sm font-mono whitespace-pre-wrap mb-4">No task selected</div>
+
+            <div class="flex gap-2">
+                <button onclick="downloadFile()" class="bg-purple-500 text-white px-4 py-2 rounded flex-1">Download</button>
+                <button onclick="cancelTask()" class="bg-red-500 text-white px-4 py-2 rounded flex-1">Cancel Task</button>
+            </div>
+        </section>
+    </div>
+
+    <script>
+        const API_BASE = "http://localhost:8000"; // APIのURLに合わせて変更
+        let authToken = "";
+
+        // 1. ログイン
+        async function login() {
+            // FormDataの代わりに URLSearchParams を使う（x-www-form-urlencoded形式にするため）
+            const params = new URLSearchParams();
+            params.append('username', document.getElementById('username').value);
+            params.append('password', document.getElementById('password').value);
+        
+            try {
+                const response = await fetch(`${API_BASE}/token`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: params // URLSearchParamsを渡すと自動的に正しい形式になります
+                });
+        
+                if (response.status === 405) {
+                    alert("Error 405: API側のURL定義(POST /token)を確認してください。");
+                    return;
+                }
+        
+                const data = await response.json();
+                if (data.access_token) {
+                    authToken = data.access_token;
+                    document.getElementById('auth-status').innerText = "Status: Logged In ✅";
+                    document.getElementById('auth-status').classList.replace('text-gray-600', 'text-green-600');
+                } else {
+                    alert("Login failed: " + (data.detail || "Invalid credentials"));
+                }
+            } catch (e) { 
+                alert("Error: " + e); 
+            }
+        }
+        
+        async function login() {
+            const formData = new FormData();
+            formData.append('username', document.getElementById('username').value);
+            formData.append('password', document.getElementById('password').value);
+
+            try {
+                const response = await fetch(`${API_BASE}/token`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                if (data.access_token) {
+                    authToken = data.access_token;
+                    document.getElementById('auth-status').innerText = "Status: Logged In ✅";
+                    document.getElementById('auth-status').classList.add('text-green-600');
+                } else {
+                    alert("Login failed: " + JSON.stringify(data));
+                }
+            } catch (e) { alert("Error: " + e); }
+        }
+
+        // 2. アップロード
+        async function uploadFile() {
+            if (!authToken) return alert("Please login first");
+            
+            const file = document.getElementById('file-input').files[0];
+            const encPass = document.getElementById('enc-password').value;
+            if (!file || !encPass) return alert("File and Password are required");
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            const url = new URL(`${API_BASE}/upload`);
+            url.searchParams.append('encryption_password', encPass);
+
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` },
+                    body: formData
+                });
+                const data = await response.json();
+                document.getElementById('task-id').value = data.parent_task_id;
+                document.getElementById('status-display').innerText = JSON.stringify(data, null, 2);
+            } catch (e) { alert("Upload error: " + e); }
+        }
+
+        // 3. ステータス確認
+        async function checkStatus() {
+            const taskId = document.getElementById('task-id').value;
+            if (!taskId) return;
+
+            try {
+                const response = await fetch(`${API_BASE}/status/${taskId}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                document.getElementById('status-display').innerText = JSON.stringify(data, null, 2);
+            } catch (e) { alert("Status check error: " + e); }
+        }
+
+        // 4. ダウンロード
+        async function downloadFile() {
+            const taskId = document.getElementById('task-id').value;
+            const password = document.getElementById('enc-password').value;
+            
+            try {
+                const response = await fetch(`${API_BASE}/download/${taskId}?password=${password}`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                
+                if (response.status !== 200) {
+                    const err = await response.json();
+                    return alert("Download failed: " + err.detail);
+                }
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `translated_${taskId}.txt`;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+            } catch (e) { alert("Download error: " + e); }
+        }
+
+        // 5. 中断
+        async function cancelTask() {
+            const taskId = document.getElementById('task-id').value;
+            try {
+                const response = await fetch(`${API_BASE}/cancel/${taskId}`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const data = await response.json();
+                alert(data.message);
+                checkStatus();
+            } catch (e) { alert("Cancel error: " + e); }
+        }
+    </script>
+</body>
+</html>
