@@ -18,6 +18,14 @@ services:
       - "8000:8000"
     environment:
       - REDIS_URL=redis://redis:6379/0  # コンテナ間通信用のエイリアス
+#      - JWKS_URL=http://host.docker.internal/jwtauth/jwks
+      - JWKS_URL=http://10.10.1.10/jwtauth/jwks
+      - JWT_ISSUER=JwtAuthApi
+      - JWT_AUDIENCE=Any
+      - JWKS_REFRESH_COOLDOWN=60
+    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+      - "10.10.1.10:host-gateway"
     depends_on:
       - redis
 

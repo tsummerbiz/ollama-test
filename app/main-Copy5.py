@@ -22,9 +22,6 @@ from celery.contrib.abortable import AbortableAsyncResult
 # tasks.py からのインポート
 from tasks import app as celery_app, split_and_dispatch, get_task_progress, decrypt_file, get_callback_id
 
-from auth import JWTChecker
-
-""" 
 # --- 設定項目 (本番環境では環境変数から取得してください) ---
 SECRET_KEY = "YOUR_SUPER_SECRET_KEY_DONT_SHARE" # openssl rand -hex 32 等で生成
 ALGORITHM = "HS256"
@@ -42,7 +39,6 @@ fake_users_db = {
 
 #pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
-"""
 
 app = FastAPI(title="Distributed Translation System API with JWT")
 
@@ -65,7 +61,7 @@ UPLOAD_DIR = NFS_BASE_PATH / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # --- ユーティリティ関数 ---
-"""
+
 def verify_password(plain_password: str, hashed_password: str):
     # 文字列をバイト列に変換してチェック
     password_byte = plain_password.encode('utf-8')
@@ -103,8 +99,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     if user is None:
         raise credentials_exception
     return user
-"""
-"""
+
 # --- 認証用エンドポイント ---
 @app.post("/token", summary="ログインしてアクセストークンを取得")
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -117,14 +112,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
     access_token = create_access_token(data={"sub": user["username"]})
     return {"access_token": access_token, "token_type": "bearer"}
-"""
 
 # --- 保護された既存エンドポイント ---
-
-@app.post("/login", summary="ログインユーザの情報を返却")
-async def login_info(user: dict = Depends(JWTChecker())):
-    return {"message": "Authenticated", "user_sub": user.get("sub")}
-    
 
 @app.post("/upload", summary="ファイルをアップロードして翻訳を開始")
 async def upload_file(
@@ -135,14 +124,13 @@ async def upload_file(
     target_lang: str = "English",
     target_code: str = "en",
     chunk_size_kb: int = 4,
-#    current_user: dict = Depends(get_current_user) # 認証を追加
-    user: dict = Depends(JWTChecker()) # 認証を追加
+    current_user: dict = Depends(get_current_user) # 認証を追加
 ):
     parent_task_id = str(uuid.uuid4())
     extension = Path(file.filename).suffix
     unique_filename = f"{parent_task_id}{extension}"
     file_path = UPLOAD_DIR / unique_filename
-
+    
     try:
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
@@ -172,8 +160,7 @@ async def upload_file(
 async def download_file(
     task_id: str, 
     password: str = Query(..., description="復号用のパスワード"),
-#    current_user: dict = Depends(get_current_user) # 認証を追加
-    user: dict = Depends(JWTChecker()) # 認証を追加
+    current_user: dict = Depends(get_current_user) # 認証を追加
 ):
     callback_id = get_callback_id(task_id)
     task_result = AsyncResult(callback_id, app=celery_app)
@@ -202,11 +189,7 @@ async def download_file(
         raise HTTPException(status_code=401, detail=f"Decryption failed. Error: {str(e)}")
 
 @app.get("/status/{task_id}")
-async def get_status(
-    task_id: str, 
-#    current_user: dict = Depends(get_current_user)
-    user: dict = Depends(JWTChecker())
-):
+async def get_status(task_id: str, current_user: dict = Depends(get_current_user)):
     task_result = AsyncResult(task_id, app=celery_app)
     
     response = {
@@ -225,11 +208,7 @@ async def get_status(
     return JSONResponse(content=response)
 
 @app.post("/cancel/{task_id}", summary="タスクの中断")
-async def cancel_task(
-    task_id: str, 
-#    current_user: dict = Depends(get_current_user)
-    user: dict = Depends(JWTChecker())
-):
+async def cancel_task(task_id: str, current_user: dict = Depends(get_current_user)):
     abortable_detail = AbortableAsyncResult(task_id, app=celery_app)
     abortable_detail.abort()
     celery_app.control.revoke(task_id, terminate=True)

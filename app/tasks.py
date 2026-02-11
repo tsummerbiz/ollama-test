@@ -42,8 +42,13 @@ redis_client = redis.StrictRedis.from_url(REDIS_URL, decode_responses=True)
 # プロンプトテンプレート
 SYSTEM_PROMPT_TEMPLATE = """
 You are a professional {SOURCE_LANG} ({SOURCE_CODE}) to {TARGET_LANG} ({TARGET_CODE}) translator. Your goal is to accurately convey the meaning and nuances of the original {SOURCE_LANG} text while adhering to {TARGET_LANG} grammar, vocabulary, and cultural sensitivities.
-Produce only the {TARGET_LANG} translation, without any additional explanations or commentary. Please translate the following {SOURCE_LANG} text into {TARGET_LANG}:
 
+### Output Format:
+Produce the output in a bilingual format using a Markdown table. 
+- Column 1: Original {SOURCE_LANG} text
+- Column 2: {TARGET_LANG} translation
+
+Produce only the {TARGET_LANG} translation, without any additional explanations or commentary. Please translate the following {SOURCE_LANG} text into {TARGET_LANG}:
 
 {TEXT}
 """
